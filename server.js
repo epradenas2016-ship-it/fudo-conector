@@ -5,9 +5,8 @@
 //
 // NO hace falta tocar nada de este archivo. Solo hay que:
 //   1. Subir esta carpeta a un hosting (instrucciones en README.md)
-//   2. Configurar 1 variable de entorno: FUDO_API_SECRET
-//      (el token que se genera en Fudo: Administración > Usuarios >
-//      [usuario] > "Establecer API Secret")
+//   2. Configurar 2 variables de entorno: FUDO_API_KEY y FUDO_API_SECRET
+//      (se generan en Fudo: Administración > Usuarios > [usuario])
 //   3. Pegar la URL final en Claude (Configuración > Conectores)
 // -----------------------------------------------------------------
 
@@ -17,24 +16,69 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 
 const FUDO_API_BASE = "https://api.fu.do/v1alpha1";
-// Fudo usa un único token ("API Secret"), generado a mano desde
-// Administración > Usuarios > [usuario] > "Establecer API Secret".
-// No existe un endpoint de login que intercambie key+secret por un token:
-// este token YA es la credencial que se manda en cada pedido.
+// El endpoint de autenticación vive en un dominio DISTINTO al de la API
+// (auth.fu.do, no api.fu.do). Ahí se cambian apiKey+apiSecret por un
+// token temporal que dura 24hs.
+const FUDO_AUTH_URL = "https://auth.fu.do/api";
+const FUDO_API_KEY = process.env.FUDO_API_KEY;
 const FUDO_API_SECRET = process.env.FUDO_API_SECRET;
 
-if (!FUDO_API_SECRET) {
+if (!FUDO_API_KEY || !FUDO_API_SECRET) {
   console.warn(
-    "⚠️  Falta configurar FUDO_API_SECRET como variable de entorno."
+    "⚠️  Falta configurar FUDO_API_KEY y/o FUDO_API_SECRET como variables de entorno."
   );
 }
 
-async function fudoRequest(path, { method = "GET", query = {} } = {}) {
-  if (!FUDO_API_SECRET) {
+// ------------------------------------------------------------------
+// Manejo del token: Fudo lo vence a las 24hs, así que lo guardamos
+// en memoria y lo renovamos automáticamente antes de que expire.
+// ------------------------------------------------------------------
+let cachedToken = null;
+let tokenExpiresAt = 0;
+
+async function getFudoToken() {
+  const now = Date.now();
+  // Si todavía es válido (con 5 min de margen), lo reutilizamos
+  if (cachedToken && now < tokenExpiresAt - 5 * 60 * 1000) {
+    return cachedToken;
+  }
+
+  const resp = await fetch(FUDO_AUTH_URL, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      apiKey: FUDO_API_KEY,
+      apiSecret: FUDO_API_SECRET,
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
     throw new Error(
-      "Falta configurar la variable de entorno FUDO_API_SECRET con el token generado en Fudo."
+      `No se pudo autenticar contra Fudo (status ${resp.status}). ` +
+        `Respuesta: ${text}. Revisá que FUDO_API_KEY y FUDO_API_SECRET sean correctos.`
     );
   }
+
+  const data = await resp.json();
+  cachedToken = data.token;
+  // "exp" viene como segundos desde el Epoch (no milisegundos)
+  tokenExpiresAt = data.exp ? Number(data.exp) * 1000 : now + 23 * 60 * 60 * 1000;
+
+  if (!cachedToken) {
+    throw new Error(
+      "Fudo respondió pero no encontré el token en la respuesta."
+    );
+  }
+
+  return cachedToken;
+}
+
+async function fudoRequest(path, { method = "GET", query = {} } = {}) {
+  const token = await getFudoToken();
   const url = new URL(`${FUDO_API_BASE}${path}`);
   Object.entries(query).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
@@ -43,7 +87,7 @@ async function fudoRequest(path, { method = "GET", query = {} } = {}) {
   const resp = await fetch(url, {
     method,
     headers: {
-      Authorization: `Bearer ${FUDO_API_SECRET}`,
+      Authorization: `Bearer ${token}`,
       Accept: "application/json",
     },
   });
