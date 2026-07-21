@@ -131,9 +131,15 @@ function buildMcpServer() {
       },
     },
     async ({ fecha_desde, fecha_hasta }) => {
-      const data = await fudoRequest("/sales", {
-        query: { from: fecha_desde, to: fecha_hasta },
-      });
+      const query = {};
+      if (fecha_desde && fecha_hasta) {
+        query["filter[createdAt]"] = `and(gte.${fecha_desde}T00:00:00Z,lte.${fecha_hasta}T23:59:59Z)`;
+      } else if (fecha_desde) {
+        query["filter[createdAt]"] = `gte.${fecha_desde}T00:00:00Z`;
+      } else if (fecha_hasta) {
+        query["filter[createdAt]"] = `lte.${fecha_hasta}T23:59:59Z`;
+      }
+      const data = await fudoRequest("/sales", { query });
       return {
         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       };
